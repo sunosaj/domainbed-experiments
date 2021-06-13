@@ -14,7 +14,13 @@ import PIL
 import torch
 import torchvision
 import torch.utils.data
+import os.path as osp
+import sys
 
+THIS_PATH = osp.dirname(__file__)
+ROOT_PATH = osp.abspath(osp.join(THIS_PATH, '../..'))
+sys.path.append(ROOT_PATH)
+os.chdir(ROOT_PATH)
 from domainbed import datasets
 from domainbed import hparams_registry
 from domainbed import algorithms
@@ -48,13 +54,13 @@ if __name__ == "__main__":
         help="For domain adaptation, % of test to use unlabeled for training.")
     parser.add_argument('--skip_model_save', action='store_true')
     parser.add_argument('--save_model_every_checkpoint', action='store_true')
+    parser.add_argument('--domain_index', action='store_true', default=False)
     args = parser.parse_args()
 
     # If we ever want to implement checkpointing, just persist these values
     # every once in a while, and then load them from disk here.
     start_step = 0
     algorithm_dict = None
-
     os.makedirs(args.output_dir, exist_ok=True)
     sys.stdout = misc.Tee(os.path.join(args.output_dir, 'out.txt'))
     sys.stderr = misc.Tee(os.path.join(args.output_dir, 'err.txt'))
@@ -107,7 +113,7 @@ if __name__ == "__main__":
     # To allow unsupervised domain adaptation experiments, we split each test
     # env into 'in-split', 'uda-split' and 'out-split'. The 'in-split' is used
     # by collect_results.py to compute classification accuracies.  The
-    # 'out-split' is used by the Oracle model selectino method. The unlabeled
+    # 'out-split' is used by the Oracle model selection method. The unlabeled
     # samples in 'uda-split' are passed to the algorithm at training time if
     # args.task == "domain_adaptation". If we are interested in comparing
     # domain generalization and domain adaptation results, then domain
@@ -147,7 +153,7 @@ if __name__ == "__main__":
         dataset=env,
         weights=env_weights,
         batch_size=hparams['batch_size'],
-        num_workers=dataset.N_WORKERS)
+        num_workers=0)#dataset.N_WORKERS)
         for i, (env, env_weights) in enumerate(in_splits)
         if i not in args.test_envs]
 
@@ -155,14 +161,14 @@ if __name__ == "__main__":
         dataset=env,
         weights=env_weights,
         batch_size=hparams['batch_size'],
-        num_workers=dataset.N_WORKERS)
+        num_workers=0)#dataset.N_WORKERS)
         for i, (env, env_weights) in enumerate(uda_splits)
         if i in args.test_envs]
 
     eval_loaders = [FastDataLoader(
         dataset=env,
         batch_size=64,
-        num_workers=dataset.N_WORKERS)
+        num_workers=0)#dataset.N_WORKERS)
         for env, _ in (in_splits + out_splits + uda_splits)]
     eval_weights = [None for _, weights in (in_splits + out_splits + uda_splits)]
     eval_loader_names = ['env{}_in'.format(i)
@@ -172,7 +178,7 @@ if __name__ == "__main__":
     eval_loader_names += ['env{}_uda'.format(i)
         for i in range(len(uda_splits))]
 
-    algorithm_class = algorithms.get_algorithm_class(args.algorithm)
+    algorithm_class = algorithms.get_algorithm_class(args.algorithm)  # here get the class of algorithm
     algorithm = algorithm_class(dataset.input_shape, dataset.num_classes,
         len(dataset) - len(args.test_envs), hparams)
 
@@ -207,8 +213,12 @@ if __name__ == "__main__":
     last_results_keys = None
     for step in range(start_step, n_steps):
         step_start_time = time.time()
-        minibatches_device = [(x.to(device), y.to(device))
-            for x,y in next(train_minibatches_iterator)]
+        if 'dm_idx' in hparams.keys():
+            minibatches_device = [(x.to(device), y.to(device), c_d.to(device))
+                                  for x, y, c_d in next(train_minibatches_iterator)]
+        else:
+            minibatches_device = [(x.to(device), y.to(device))
+                for x,y in next(train_minibatches_iterator)]
         if args.task == "domain_adaptation":
             uda_device = [x.to(device)
                 for x,_ in next(uda_minibatches_iterator)]

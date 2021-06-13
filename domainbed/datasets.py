@@ -157,10 +157,16 @@ class RotatedMNIST(MultipleEnvironmentMNIST):
     ENVIRONMENTS = ['0', '15', '30', '45', '60', '75']
 
     def __init__(self, root, test_envs, hparams):
+        if 'dm_idx' in hparams.keys():
+            self.dm_idx = hparams['dm_idx']
+        else:
+            self.dm_idx = False
         super(RotatedMNIST, self).__init__(root, [0, 15, 30, 45, 60, 75],
                                            self.rotate_dataset, (1, 28, 28,), 10)
 
+
     def rotate_dataset(self, images, labels, angle):
+        # self.dm_index = domain_index  # return domain index or not
         rotation = transforms.Compose([
             transforms.ToPILImage(),
             transforms.Lambda(lambda x: rotate(x, angle, fill=(0,),
@@ -172,8 +178,11 @@ class RotatedMNIST(MultipleEnvironmentMNIST):
             x[i] = rotation(images[i])
 
         y = labels.view(-1)
-
-        return TensorDataset(x, y)
+        c = angle/360 * torch.ones_like(y)
+        if self.dm_idx:
+            return TensorDataset(x, y, c)
+        else:
+            return TensorDataset(x, y)
 
 
 class MultipleEnvironmentImageFolder(MultipleDomainDataset):
