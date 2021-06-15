@@ -7,6 +7,7 @@ import torchvision.models
 
 from domainbed.lib import wide_resnet
 import copy
+import random
 
 
 def remove_batch_norm_from_resnet(model):
@@ -230,42 +231,44 @@ class WholeFish(nn.Module):
         
 class VAE(nn.Module):
 
-    def __init__(self, encoder_layer_sizes, latent_size, decoder_layer_sizes,
-                 conditional=False, num_labels=0):
+    def __init__(self, latent_size,
+                 encoder_layer_chans=[1, 8, 16, 32], decoder_layer_chans=[32,16,8,1],
+                 conditional=False, num_labels=10):
 
         super().__init__()
 
         if conditional:
             assert num_labels > 0
 
-        assert type(encoder_layer_sizes) == list
+        assert type(encoder_layer_chans) == list
         assert type(latent_size) == int
-        assert type(decoder_layer_sizes) == list
+        assert type(decoder_layer_chans) == list
 
         self.latent_size = latent_size
 
         self.encoder = Encoder(
-            encoder_layer_sizes, latent_size, conditional, num_labels)
+            encoder_layer_chans, latent_size, conditional, num_labels)
         self.decoder = Decoder(
-            decoder_layer_sizes, latent_size, conditional, num_labels)
+            decoder_layer_chans, latent_size, conditional, num_labels)
 
-    def forward(self, x, c=None, mode='recon'):
+    def forward(self, x=None, d=None, yhat=None, mode='recon'):
 
         if mode == 'recon':
-            if x.dim() > 2:
-                x = x.view(-1, 28 * 28)
-            means, log_var, c_pred = self.encoder(x, c)
+            means, log_var, d, yhat = self.encoder(x, d)
             z = self.reparameterize(means, log_var)
-            recon_x = self.decoder(z, c.unsqueeze(1))
-            return recon_x, means, log_var, z, c_pred
+            recon_x = self.decoder(z, d, yhat)
+            return recon_x, means, log_var, d, yhat
         elif mode == 'dom_aug': # unseen domain data generation
-            recon_x = self.decoder(x, c)
-            _, _, c_pp = self.encoder(recon_x, None)
-            return c_pp
-
-        # recon_x = self.decoder(z, c.unsqueeze(1))
-        # _, _, c_pp = self.encoder(self.decoder(z, c.unsqueeze(1) + 15), None)
-        # return recon_x, means, log_var, z, c_pred, c_pp[:, -1]
+            d = torch.zeros([32]).to('cuda')  # for test_env 0, all d = 0
+            yhat = torch.zeros([32, 10]).to('cuda')
+            y = []
+            for i in range(32):
+                _y = random.randint(0, 9)
+                yhat[i, _y] = 1
+                y.append(_y)
+            z = torch.randn([32, self.latent_size]).to('cuda')
+            aug_x = self.decoder(z, d, yhat)
+            return aug_x, torch.LongTensor(y).to('cuda')
 
 
     def reparameterize(self, mu, log_var):
@@ -284,65 +287,63 @@ class VAE(nn.Module):
 
 class Encoder(nn.Module):
 
-    def __init__(self, layer_sizes, latent_size, conditional, num_labels):
+    def __init__(self, layer_sizes, latent_size, conditional, num_labels, layer_chans=[1, 8, 16, 32]):
 
         super().__init__()
 
+        kernel_size = 4  # (4, 4) kernel
+        init_channels = 8  # initial number of filters
+        image_channels = 1  # MNIST images are grayscale
+        latent_dim = 16  # latent dimension for sampling
+        self.num_labels = num_labels
         self.conditional = conditional
         if self.conditional:
             layer_sizes[-1] += 1
-
-        self.MLP = nn.Sequential()
-
-        for i, (in_size, out_size) in enumerate(zip(layer_sizes[:-1], layer_sizes[1:])):
-            self.MLP.add_module(
-                name="L{:d}".format(i), module=nn.Linear(in_size, out_size))
-            self.MLP.add_module(name="A{:d}".format(i), module=nn.ReLU())
-
-        self.linear_means = nn.Linear(layer_sizes[-1]-1, latent_size)
-        self.linear_log_var = nn.Linear(layer_sizes[-1]-1, latent_size)
+        self.enc = nn.Sequential()
+        for i, (in_chan, out_chan) in enumerate(zip(layer_sizes[:-1], layer_sizes[1:])):
+            self.enc.add_module(
+                name="L{:d}".format(i), module=nn.Conv2d(
+                in_channels=in_chan, out_channels=out_chan, kernel_size=kernel_size,
+                stride=2, padding=1))
+            self.enc.add_module(name="A{:d}".format(i), module=nn.ReLU())
+        self.fc1 = nn.Linear(288, 64)
+        self.linear_means = nn.Linear(64-1-num_labels, latent_size)
+        self.linear_log_var = nn.Linear(64-1-num_labels, latent_size)
 
     def forward(self, x, c=None):
-        # if self.conditional:
-        #     c = idx2onehot(c, n=10)
-        #     x = torch.cat((x, c), dim=-1)
-
-        x = self.MLP(x)
-        c = x[:,[-1]]
-        means = self.linear_means(x[:,:-1])
-        log_vars = self.linear_log_var(x[:,:-1])
-
-        return means, log_vars, c
+        batch = x.shape[0]
+        x = self.enc(x)
+        x = x.view(batch, -1)
+        hidden = self.fc1(x)
+        d = hidden[:, -1]
+        yhat = hidden[:, -1-self.num_labels:-1]
+        means = self.linear_means(hidden[:,:-1-self.num_labels])
+        log_vars = self.linear_log_var(hidden[:,:-1-self.num_labels])
+        return means, log_vars, d, yhat
 
 
 class Decoder(nn.Module):
 
-    def __init__(self, layer_sizes, latent_size, conditional, num_labels):
-
+    def __init__(self, layer_sizes, latent_size, conditional, num_labels, layer_chans=[32,16,8,1]):
         super().__init__()
-
-        self.MLP = nn.Sequential()
-
+        kernel_size = 4  # (4, 4) kernel
+        self.fc1 = nn.Linear(latent_size+num_labels+1, 288)
+        self.dec = nn.Sequential()
         self.conditional = conditional
-        if self.conditional:
-            input_size = latent_size + 1
-        else:
-            input_size = latent_size
-
-        for i, (in_size, out_size) in enumerate(zip([input_size]+layer_sizes[:-1], layer_sizes)):
-            self.MLP.add_module(
-                name="L{:d}".format(i), module=nn.Linear(in_size, out_size))
-            if i+1 < len(layer_sizes):
-                self.MLP.add_module(name="A{:d}".format(i), module=nn.ReLU())
+        self.padding = [1, 0, 0]
+        for i, (in_chan, out_chan) in enumerate(zip(layer_sizes[:-1], layer_sizes[1:])):
+            self.dec.add_module(
+                name="L{:d}".format(i), module=nn.ConvTranspose2d(
+                in_channels=in_chan, out_channels=out_chan, kernel_size=kernel_size,
+                stride=2, padding=self.padding[i]))
+            if i+2 < len(layer_sizes):
+                self.dec.add_module(name="A{:d}".format(i), module=nn.ReLU())
             else:
-                self.MLP.add_module(name="sigmoid", module=nn.Sigmoid())
+                self.dec.add_module(name="sigmoid", module=nn.Sigmoid())
 
-    def forward(self, z, c):
+    def forward(self, z, d, yhat):
 
-        if self.conditional:
-            # c = idx2onehot(c, n=10)
-            z = torch.cat((z, c), dim=-1)
-
-        x = self.MLP(z)
-
-        return x
+        z = torch.cat((z, F.softmax(yhat), d.unsqueeze(1)), dim=-1)
+        hidden = self.fc1(z)
+        x = self.dec(hidden.view(-1, 32, 3, 3))
+        return x[:, :, 1:-1, 1:-1]

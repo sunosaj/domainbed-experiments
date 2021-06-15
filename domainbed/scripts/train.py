@@ -54,7 +54,6 @@ if __name__ == "__main__":
         help="For domain adaptation, % of test to use unlabeled for training.")
     parser.add_argument('--skip_model_save', action='store_true')
     parser.add_argument('--save_model_every_checkpoint', action='store_true')
-    parser.add_argument('--domain_index', action='store_true', default=False)
     args = parser.parse_args()
 
     # If we ever want to implement checkpointing, just persist these values
@@ -124,11 +123,12 @@ if __name__ == "__main__":
     uda_splits = []
     for env_i, env in enumerate(dataset):
         uda = []
-
+        # out, in are data splited into 2 parts
         out, in_ = misc.split_dataset(env,
             int(len(env)*args.holdout_fraction),
             misc.seed_hash(args.trial_seed, env_i))
-
+        # test on part of in_ above
+        # above is for domain adaptation
         if env_i in args.test_envs:
             uda, in_ = misc.split_dataset(in_,
                 int(len(in_)*args.uda_holdout_fraction),
@@ -141,8 +141,8 @@ if __name__ == "__main__":
                 uda_weights = misc.make_weights_for_balanced_classes(uda)
         else:
             in_weights, out_weights, uda_weights = None, None, None
-        in_splits.append((in_, in_weights))
-        out_splits.append((out, out_weights))
+        in_splits.append((in_, in_weights))  # train on in_splits
+        out_splits.append((out, out_weights))  # test on out_splits
         if len(uda):
             uda_splits.append((uda, uda_weights))
 
@@ -211,11 +211,28 @@ if __name__ == "__main__":
 
 
     last_results_keys = None
+    if 'dm_idx' in hparams.keys():
+        for step in range(start_step, 2000):
+            if 'dm_idx' in hparams.keys():
+                minibatches_device = [(x.to(device), y.to(device), d.to(device))
+                                      for x, y, d in next(train_minibatches_iterator)]
+            else:
+                minibatches_device = [(x.to(device), y.to(device))
+                    for x,y in next(train_minibatches_iterator)]
+            if args.task == "domain_adaptation":
+                uda_device = [x.to(device)
+                    for x,_ in next(uda_minibatches_iterator)]
+            else:
+                uda_device = None
+            step_vals = algorithm.update_augmentor(minibatches_device, uda_device)
+            if step%200==0:
+                print("step {} loss: {}".format(step, step_vals['loss']))
+
     for step in range(start_step, n_steps):
         step_start_time = time.time()
         if 'dm_idx' in hparams.keys():
-            minibatches_device = [(x.to(device), y.to(device), c_d.to(device))
-                                  for x, y, c_d in next(train_minibatches_iterator)]
+            minibatches_device = [(x.to(device), y.to(device), d.to(device))
+                                  for x, y, d in next(train_minibatches_iterator)]
         else:
             minibatches_device = [(x.to(device), y.to(device))
                 for x,y in next(train_minibatches_iterator)]

@@ -112,10 +112,14 @@ def accuracy(network, loader, weights, device):
     correct = 0
     total = 0
     weights_offset = 0
-
+    domain_index = True
     network.eval()
     with torch.no_grad():
-        for x, y in loader:
+        for batch in loader:
+            if domain_index:
+                x, y, _ = batch
+            else:
+                x, y = batch
             x = x.to(device)
             y = y.to(device)
             p = network.predict(x)
